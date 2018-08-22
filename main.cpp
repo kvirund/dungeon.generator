@@ -1,4 +1,6 @@
 #include "level.hpp"
+#include "fractal.hpp"
+#include "time_utils.hpp"
 
 #include <SDL.h>
 #include <SDL_video.h>
@@ -6,64 +8,25 @@
 
 #include <vector>
 #include <sstream>
-#include <functional>
+//#include <functional>
 #include <iomanip>
-#include <chrono>
-#include <thread>
+//#include <chrono>
+//#include <thread>
 #include <algorithm>
 #include <list>
 #include <mutex>
-#include <future>
-#include <complex>
-
-class Profiler
-{
-public:
-	using duration_t = std::chrono::duration<long double>;
-
-	Profiler() : m_start(std::chrono::high_resolution_clock::now()) {}
-
-	duration_t delta() const;
-
-	void reset() { m_start = std::chrono::high_resolution_clock::now(); }
-
-private:
-	std::chrono::high_resolution_clock::time_point m_start;
-};
-
-Profiler::duration_t Profiler::delta() const
-{
-	return std::chrono::duration_cast<duration_t>(std::chrono::high_resolution_clock::now() - m_start);
-}
-
-class ProfilerWithOutput : public Profiler
-{
-public:
-	ProfilerWithOutput(duration_t& output) : m_output(output) {}
-
-	~ProfilerWithOutput() { m_output = delta(); }
-
-private:
-	duration_t& m_output;
-};
-
-class Fractal
-{
-public:
-	using unique_ptr = std::unique_ptr<Fractal>;
-
-	virtual ~Fractal() = default;
-
-	virtual int order(int x, int y) const = 0;
-	virtual int max_order() const = 0;
-	virtual bool done() const = 0;
-	virtual void step() = 0;
-};
+#include <atomic>
 
 class SDLApplication
 {
 public:
-	SDLApplication();
+	enum Mode
+	{
+		LEVEL,
+		FRACTAL
+	};
+
+	SDLApplication(Mode mode);
 	~SDLApplication();
 
 	int run();
@@ -80,6 +43,7 @@ private:
 	void draw_thread();
 	void print_off();
 	void measure_average_frame_processing_time();
+	void draw_fractal() const;
 
 	SDL_Window *m_window;
 	SDL_Renderer *m_renderer;
@@ -109,9 +73,11 @@ private:
 	std::mutex m_renderer_mutex;
 
 	Fractal::unique_ptr m_fractal;
+
+	Mode m_mode;
 };
 
-SDLApplication::SDLApplication() : m_window(nullptr),
+SDLApplication::SDLApplication(Mode mode) : m_window(nullptr),
 		m_renderer(nullptr),
 		m_font(nullptr),
 		m_average_frame_processing_time(0.0),
@@ -126,7 +92,8 @@ SDLApplication::SDLApplication() : m_window(nullptr),
 		m_dragging(false),
 		m_last_mouse_position{0, 0},
 		m_to_print_off(nullptr),
-		m_to_paint_on(nullptr)
+		m_to_paint_on(nullptr),
+		m_mode(mode)
 {
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
 	{
@@ -153,7 +120,10 @@ SDLApplication::SDLApplication() : m_window(nullptr),
 		throw std::runtime_error(ss.str());
 	}
 
-	m_level.generate(80, 25);
+	if (LEVEL == m_mode)
+	{
+		m_level.generate();
+	}
 }
 
 SDLApplication::~SDLApplication()
@@ -283,6 +253,10 @@ int SDLCALL SDLApplication::watch(void *user_data, SDL_Event *event)
 			application->m_moving_y = MOVE_COEFFICIENT;
 			break;
 
+		case SDL_SCANCODE_R:
+			application->m_level.generate();
+			break;
+
 		default:
 			break;
 		}
@@ -325,7 +299,11 @@ int SDLCALL SDLApplication::watch(void *user_data, SDL_Event *event)
 
 int SDLApplication::loop()
 {
-	std::thread draw_thread(&SDLApplication::draw_thread, this);
+	std::thread draw_thread;
+	if (FRACTAL == m_mode)
+	{
+		draw_thread = std::thread(&SDLApplication::draw_thread, this);
+	}
 
 	int result = 0;
 	while (!m_quitting)
@@ -347,7 +325,10 @@ int SDLApplication::loop()
 		measure_average_frame_processing_time();
 	}
 
-	draw_thread.join();
+	if (FRACTAL == m_mode)
+	{
+		draw_thread.join();
+	}
 
 	return result;
 }
@@ -371,7 +352,7 @@ void SDLApplication::render()
 		SDL_SetRenderDrawColor(m_renderer, background.r, background.g, background.b, background.a);
 		SDL_RenderClear(m_renderer);
 
-		if (false)
+		if (LEVEL == m_mode)
 		{
 			draw_level();
 		}
@@ -427,17 +408,20 @@ void SDLApplication::print_stats() const
 	ss << "FPS: " << std::fixed << std::setprecision(2) << fps;
 	strings.push_back(ss.str());
 
-	ss.str("");
-	ss << "left offset: " << m_left_offset;
-	strings.push_back(ss.str());
+	if (LEVEL == m_mode)
+	{
+		ss.str("");
+		ss << "left offset: " << m_left_offset;
+		strings.push_back(ss.str());
 
-	ss.str("");
-	ss << "top offset: " << m_top_offset;
-	strings.push_back(ss.str());
+		ss.str("");
+		ss << "top offset: " << m_top_offset;
+		strings.push_back(ss.str());
 
-	ss.str("");
-	ss << "zoom factor: " << m_zoom_factor;
-	strings.push_back(ss.str());
+		ss.str("");
+		ss << "zoom factor: " << m_zoom_factor;
+		strings.push_back(ss.str());
+	}
 
 	if (m_fractal)
 	{
@@ -490,195 +474,46 @@ void SDLApplication::update()
 	}
 }
 
-class AbstractJuliaSet : public Fractal
-{
-public:
-	using complex_t = std::complex<double>;
-
-	AbstractJuliaSet(int w, int h);
-
-	int order(int x, int y) const override;
-	int max_order() const override;
-	bool done() const override;
-	void step() override;
-
-protected:
-	static constexpr auto MAX_ORDER = 1000;
-
-	using point_t = struct
-	{
-		complex_t z;
-		complex_t c;
-		int order;
-	};
-	using column_t = std::vector<point_t>;
-
-	virtual complex_t z(int x, int y) const = 0;
-	virtual complex_t c(int x, int y) const = 0;
-
-	int width() const { return m_width; }
-
-	int height() const { return m_height; }
-
-	void init_fractal();
-
-private:
-	std::vector<column_t> m_points;
-	int m_current_order;
-	int m_width;
-	int m_height;
-	int m_advanced;
-};
-
-AbstractJuliaSet::AbstractJuliaSet(int w, int h) : m_points(w, column_t(h)),
-		m_current_order(0),
-		m_width(w),
-		m_height(h),
-		m_advanced(1)
-{
-}
-
-void AbstractJuliaSet::init_fractal()
-{
-	for (auto y = 0; y != m_height; ++y)
-	{
-		for (auto x = 0; x != m_width; ++x)
-		{
-			m_points[x][y].c = c(x, y);
-			m_points[x][y].z = z(x, y);
-			m_points[x][y].order = m_current_order;
-		}
-	}
-}
-
-int AbstractJuliaSet::order(int x, int y) const { return m_points[x][y].order; }
-
-int AbstractJuliaSet::max_order() const { return m_current_order; }
-
-void AbstractJuliaSet::step()
-{
-	if (0 == m_advanced)
-	{
-		// all remaining points are divergent
-		return;
-	}
-
-	constexpr auto BATCH_SIZE = 12;
-
-	m_advanced = 0;
-	const auto STEPS = std::min(BATCH_SIZE, MAX_ORDER - m_current_order);
-	for (auto y = 0; y != m_height; ++y)
-	{
-		for (auto x = 0; x != m_width; ++x)
-		{
-			if (m_points[x][y].order == m_current_order)
-			{
-				auto i = 0;
-				auto z = m_points[x][y].z * m_points[x][y].z + m_points[x][y].c;
-
-				while (i != STEPS
-						&& 2 >= std::abs(z))
-				{
-					m_points[x][y].z = z;
-					++i;
-					z = z * z + m_points[x][y].c;
-					if (z == m_points[x][y].z)
-					{
-						i = 0;
-						m_points[x][y].order = MAX_ORDER;
-						break;
-					}
-				}
-
-				if (0 != i)
-				{
-					m_points[x][y].order += i;
-					++m_advanced;
-				}
-			}
-		}
-	}
-
-	m_current_order += STEPS;
-}
-
-bool AbstractJuliaSet::done() const { return MAX_ORDER == m_current_order || 0 == m_advanced; }
-
-class MandelbrotFractal : public AbstractJuliaSet
-{
-public:
-	MandelbrotFractal(int w, int h);
-
-private:
-	complex_t c(int x, int y) const override;
-	complex_t z(int x, int y) const override;
-};
-
-MandelbrotFractal::MandelbrotFractal(int w, int h) : AbstractJuliaSet(w, h)
-{
-	init_fractal();
-}
-
-AbstractJuliaSet::complex_t MandelbrotFractal::c(int x, int y) const
-{
-	return {3 * static_cast<double>(x) / width() - 2.0, 2 * static_cast<double>(y) / height() - 1.0};
-}
-
-AbstractJuliaSet::complex_t MandelbrotFractal::z(int, int) const { return {0, 0}; }
-
-class JuliaSet : public AbstractJuliaSet
-{
-public:
-	JuliaSet(int w, int h, const AbstractJuliaSet::complex_t& c);
-
-private:
-	complex_t c(int x, int y) const override;
-	complex_t z(int x, int y) const override;
-
-	complex_t m_c;
-};
-
-JuliaSet::JuliaSet(int w, int h, const AbstractJuliaSet::complex_t& c) : AbstractJuliaSet(w, h), m_c(c)
-{
-	init_fractal();
-}
-
-AbstractJuliaSet::complex_t JuliaSet::c(int, int) const { return m_c; }
-
-AbstractJuliaSet::complex_t JuliaSet::z(int x, int y) const
-{
-	return {4 * static_cast<double>(x) / width() - 2.0, 4 * static_cast<double>(y) / height() - 2.0};
-}
-
-class FractalsFactory
-{
-public:
-	static Fractal::unique_ptr create_mandelbrot_fractal(int w, int h);
-	static Fractal::unique_ptr create_julia_set(int w, int h, AbstractJuliaSet::complex_t& c);
-	static Fractal::unique_ptr create_julia_set(int w, int h, double alpha);
-};
-
-Fractal::unique_ptr FractalsFactory::create_mandelbrot_fractal(int w, int h)
-{
-	return std::move(std::make_unique<MandelbrotFractal>(w, h));
-}
-
-Fractal::unique_ptr FractalsFactory::create_julia_set(int w, int h, AbstractJuliaSet::complex_t& c)
-{
-	return std::move(std::make_unique<JuliaSet>(w, h, c));
-}
-
-Fractal::unique_ptr FractalsFactory::create_julia_set(int w, int h, double alpha)
-{
-	return std::move(std::make_unique<JuliaSet>(w, h, AbstractJuliaSet::complex_t{std::cos(alpha), std::sin(alpha)}));
-}
-
 void SDLApplication::draw_thread()
 {
-	m_fractal = FractalsFactory::create_julia_set(m_to_paint_on->w, m_to_paint_on->h, AbstractJuliaSet::complex_t{-0.7269, 0.1889});
+	if (FRACTAL == m_mode)
+	{
+		m_fractal = FractalsFactory::create_julia_set(m_to_paint_on->w,
+				m_to_paint_on->h,
+				AbstractJuliaSet::complex_t{-0.7269, 0.1889});
 
+		draw_fractal();
+		print_off();
+	}
+
+	bool done = LEVEL == m_mode;
+	while (!m_quitting)
+	{
+		if (done)
+		{
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+		}
+		else if (FRACTAL == m_mode)
+		{
+			m_fractal->step();
+
+			draw_fractal();
+			print_off();
+
+			if (m_fractal->done())
+			{
+				SDL_Log("All points are divergent.");
+			}
+
+			done = m_fractal->done();
+		}
+	}
+}
+
+void SDLApplication::draw_fractal() const
+{
 	SDL_LockSurface(m_to_paint_on);
-	std::size_t offset = 0;
+	size_t offset = 0;
 	for (auto y = 0; y != m_to_paint_on->h; ++y)
 	{
 		for (auto x = 0; x != m_to_paint_on->w; ++x)
@@ -690,41 +525,6 @@ void SDLApplication::draw_thread()
 		}
 	}
 	SDL_UnlockSurface(m_to_paint_on);
-
-	print_off();
-
-	while (!m_quitting)
-	{
-		if (m_fractal->done())
-		{
-			std::this_thread::sleep_for(std::chrono::seconds(1));
-		}
-		else
-		{
-			m_fractal->step();
-
-			SDL_LockSurface(m_to_paint_on);
-			std::size_t offset = 0;
-			for (auto y = 0; y != m_to_paint_on->h; ++y)
-			{
-				for (auto x = 0; x != m_to_paint_on->w; ++x)
-				{
-					const Uint8 part = static_cast<Uint8>(255
-							- std::min(255.0 * m_fractal->order(x, y) / m_fractal->max_order(), 255.0));
-					reinterpret_cast<SDL_Color *>(m_to_paint_on->pixels)[offset] = {0, part, 0, 255};
-					++offset;
-				}
-			}
-			SDL_UnlockSurface(m_to_paint_on);
-
-			print_off();
-
-			if (m_fractal->done())
-			{
-				SDL_Log("All points are divergent.");
-			}
-		}
-	}
 }
 
 void SDLApplication::print_off()
@@ -751,7 +551,7 @@ int SDL_main(int argc, char **argv)
 {
 	try
 	{
-		SDLApplication application;
+		SDLApplication application(SDLApplication::LEVEL);
 
 		return application.run();
 	}

@@ -35,6 +35,9 @@ message(STATUS "SDL2_ttf includes: ${SDL2_TTF_INCLUDE_DIRS}")
 message(STATUS "SDL2_ttf libraries: ${SDL2_TTF_LIBRARIES}")
 # ... SDL2_ttf ends
 
+set(SOURCE_FILES main.cpp level.cpp level.hpp fractal.cpp fractal.hpp time_utils.hpp time_utils.cpp)
+list(SORT SOURCE_FILES)
+
 include_directories(${SDL2_INCLUDE_DIRS} ${SDL2_TTF_INCLUDE_DIRS})
-add_executable(${TARGET} main.cpp level.cpp level.hpp)
+add_executable(${TARGET} ${SOURCE_FILES})
 target_link_libraries(${TARGET} ${SDL2_LIBRARIES} ${SDL2_TTF_LIBRARIES} ${SYSTEM_LIBRARIES})

@@ -14,7 +14,7 @@ public:
 
 	Level(): m_width(0), m_height(0) {}
 
-	void generate(std::size_t w, std::size_t h);
+	void generate(std::size_t w = 80, std::size_t h = 25);
 
 	auto width() const { return m_width; }
 	auto height() const { return m_height; }
